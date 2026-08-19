@@ -638,3 +638,24 @@ nvidia-tuning-toolkit/
 | Tuning silently reverts to stock a moment after boot                        | `lactd` is running and resets any GPU it has no config entry for                                | Don't run both. Put the values in `/etc/lact/config.yaml`, then `sudo systemctl disable --now nvidia-tuner-*.service`. Verify with `journalctl -b \| grep 'initialized nvidia controller'` |
 | LACT settings lost after adding/moving a GPU                                | LACT config keys are PCI-address-based; the bus got renumbered                                  | Re-apply the setting in LACT; the new key is written to `/etc/lact/config.yaml` automatically                                                    |
 | `lact cli` has no command for clock offsets                                 | Not a bug — the CLI only exposes `list`/`info`/`stats`/`snapshot`/`power-limit`/`profile`       | Set offsets in `lact gui`, save them as a profile, then switch non-interactively with `lact cli profile set <name>`                              |
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Daimonion
+
+**Read this before running anything here.** These scripts change GPU power
+limits and apply core/memory clock offsets. That can destabilise hardware, and
+with ECC disabled — the current state of this install — an unstable memory
+offset can silently corrupt compute results without ever crashing or producing
+a visible artifact. The RTX PRO 6000 profiles in particular are **unvalidated
+guesses, not tested values**. The MIT licence says this in legal terms: the
+software is provided *"as is", without warranty of any kind*, and the authors
+are not liable for any damages arising from its use. Validate any profile
+against known-good workload output before trusting it.
+
+Only the code in this repository is covered. [LACT](https://github.com/ilya-zlobintsev/LACT)
+and [`nvidia-tuner`](https://github.com/WickedLukas/nvidia-tuner) are separate
+upstream projects under their own licences — neither is vendored here, both are
+installed from their own releases.
