@@ -18,8 +18,8 @@ if ! command -v nvidia-tuner &>/dev/null; then
 fi
 
 PROFILE_NAME="low-power"
-PROFILE_CORE_OFFSET=-50
-PROFILE_MEMORY_OFFSET=500
+PROFILE_CORE_OFFSET=-75
+PROFILE_MEMORY_OFFSET=1000
 PROFILE_POWER_LIMIT=300
 
 echo "Applying nvidia-tuner ${PROFILE_NAME} profile (RTX PRO 6000, unvalidated): core ${PROFILE_CORE_OFFSET}, memory ${PROFILE_MEMORY_OFFSET}, power ${PROFILE_POWER_LIMIT}W"

@@ -1,4 +1,31 @@
 # NVIDIA RTX Tuning Toolkit for Linux
+
+> ### Scope narrowed — tuning is now handled by LACT
+>
+> As of **2026-08-19**, day-to-day power/clock tuning on this machine is done with
+> **[LACT](https://github.com/ilya-zlobintsev/LACT)** (GPU control daemon + GTK GUI),
+> not with the scripts in this repo. **On a desktop** LACT is better at that job: it
+> has a real GUI, its settings survive reboot *and* resume-from-sleep, it works
+> natively on Wayland without the Coolbits/Xorg detour, and it manages AMD, NVIDIA
+> and Intel GPUs from one place. It is *not* better everywhere — its CLI is much
+> weaker than these scripts, see
+> [What LACT's CLI can't do](#what-lacts-cli-cant-do).
+>
+> **No scripts have been removed.** Everything still works and stays in the repo for
+> reference — the tuning parts are simply marked *superseded* below rather than
+> recommended. The card-specific data (memory-offset tables, power-limit constants,
+> validated 5090 profiles) is still worth keeping and is preserved in full.
+>
+> **Four things here that LACT does not do** — these remain the actively
+> recommended path:
+>
+> | Still use this repo for | Why LACT can't |
+> | --- | --- |
+> | [`install-driver.sh`](install-driver.sh) — NVIDIA open-driver + CUDA bootstrap with Secure Boot MOK enrollment | LACT is a tuning daemon; it assumes a working driver and has no installer, `mokutil`, or DKMS handling whatsoever |
+> | [`nvidia-settings/ecc-pro6000.sh`](nvidia-settings/ecc-pro6000.sh) — ECC on/off | LACT has **no ECC support** (verified: the only `ECC` strings in its binary are TLS certificate names) |
+> | [`monitor.sh`](monitor.sh) — live stats incl. **ECC error counters** | `lact cli stats` reports clocks, power, temps, fan and VRAM — but no ECC counters |
+> | [`nvidia-tuner/apply-*.sh`](nvidia-tuner/) — core offset + memory offset + power limit in one command, **fully headless** | LACT's CLI has no clock-offset command at all. Offsets can only be set in the GTK GUI, so a headless/SSH-only box can't apply them through LACT |
+
 Scripts for tuning and overclocking NVIDIA RTX GPUs. Originally built and
 tested on an MSI RTX 5090 Vanguard; now also covers an RTX PRO 6000 Blackwell
 (Workstation Edition) after a card swap.
@@ -20,9 +47,137 @@ Run `nvidia-smi` to confirm your driver version — swapping the card doesn't ch
 
 ---
 
-## Quick Start (RTX PRO 6000 — currently installed)
+## Quick Start (current, recommended)
 
-If `nvidia-smi` already works and the card is up, you can skip the driver bootstrap and start at step 2.
+```bash
+# 1. Install the NVIDIA driver + CUDA toolkit (this repo — LACT has no equivalent)
+sudo bash install-driver.sh
+
+# 2. Install LACT for power/clock tuning
+sudo apt install lact          # or grab a .deb from the LACT releases page
+sudo systemctl enable --now lactd
+
+# 3. Tune — GUI for clocks/fan/voltage, CLI for power limit and profiles
+lact gui
+lact cli list
+lact cli -g <gpu-id> power-limit set 300
+lact cli -g <gpu-id> stats
+
+# 4. ECC toggle (this repo — LACT has no ECC support)
+./nvidia-settings/ecc-pro6000.sh status   # no sudo needed
+./nvidia-settings/ecc-pro6000.sh on       # pending — needs a reboot to apply
+./nvidia-settings/ecc-pro6000.sh off
+
+# 5. Monitor, including ECC error counters (this repo — LACT has no ECC counters)
+./monitor.sh
+```
+
+If Secure Boot is enabled, `install-driver.sh` will prompt for a MOK enrollment password and the key will be enrolled on the next reboot.
+If the driver is already installed and the GPU is working, `install-driver.sh` is optional unless you want the CUDA toolkit or need to refresh the Secure Boot enrollment path.
+
+---
+
+## Using LACT
+
+### What LACT covers
+
+| Task | LACT | Replaces |
+| --- | --- | --- |
+| Power limit, persistent across reboot **and** resume | `lact cli -g <id> power-limit set <W>`, or GUI | `nvidia-settings/power-limit-*.sh` |
+| Core / memory clock offsets | **GUI only** — no CLI subcommand exists | `nvidia-settings/oc-memory-*.sh`, `oc-reset-*.sh` |
+| Fan curve, voltage offset | GUI only | — (not covered here before) |
+| Live stats (clocks, power, temps, fan, VRAM) | `lact cli -g <id> stats` + GUI | most of `monitor.sh` (except ECC counters) |
+| Named profiles, switchable from a script | Create in GUI, then `lact cli profile set <name>` | `nvidia-tuner/apply-*.sh` |
+| Applying settings at boot | Automatic — `lactd` applies its own config | `systemd/nvidia-tuner-low-power-pro6000.service` |
+| Unlocking OC controls | Uses NVML directly; works on Wayland | `nvidia-settings/install.sh` + Coolbits/Xorg |
+
+The full CLI surface is just `list`, `info`, `stats`, `snapshot`, `power-limit`
+and `profile` — clock offsets, fan control and voltage are GUI-only. If you need
+offsets applied non-interactively, define them as a **profile** in the GUI and
+switch with `lact cli profile set <name>`.
+
+Config lives in `/etc/lact/config.yaml`, keyed per GPU:
+
+```yaml
+gpus:
+  10DE:2BB1-103C:204B-0000:01:00.0:
+    fan_control_enabled: false
+    power_cap: 300.0
+```
+
+The CLI needs no `sudo` — `lactd` authorizes over its socket against the group in
+`daemon.admin_group` (default `sudo`).
+
+### What LACT's CLI can't do
+
+Worth being blunt about, since it cuts the other way: **`lact cli` is weaker than
+the scripts in this repo.** Its entire surface is
+
+```
+lact cli   list   info   stats   snapshot   power-limit   profile
+```
+
+There is no `clocks`, `offset`, `overclock`, `fan`, `voltage` or `ecc`
+subcommand — those exist only in the GTK GUI. Practical consequences:
+
+| Scenario | This repo | LACT |
+| --- | --- | --- |
+| Set core + memory offset and power limit in one shell command | `./nvidia-tuner/apply-efficient-pro6000.sh` | not possible from the CLI |
+| Tune a headless / SSH-only machine with no GTK stack | works — `nvidia-tuner` needs no display server at all | offsets unreachable; only `power-limit` works |
+| Version-control a profile as reviewable code | the `apply-*.sh` scripts are the profile | profiles are GUI-authored state in `/etc/lact/config.yaml` |
+| Toggle ECC | `./nvidia-settings/ecc-pro6000.sh on` | unsupported |
+
+The `nvidia-tuner` path really is display-independent: the boot unit in
+[`systemd/`](systemd/) runs `apply-low-power-pro6000.sh` as root at
+`multi-user.target`, before any session exists, and it applies cleanly.
+
+(The older `nvidia-settings/oc-memory-*.sh` path is *not* headless — that one
+does need an NVIDIA-managed Xorg session, which is exactly why `nvidia-tuner`
+replaced it here.)
+
+The workaround for LACT is to author a profile once in the GUI and then switch it
+non-interactively with `lact cli profile set <name>` — fine on a desktop, no help
+on a headless box.
+
+
+### Two gotchas worth knowing
+
+**1. LACT silently overwrites this repo's boot service.** `lactd.service` and any
+`nvidia-tuner-*.service` are both ordered only `After=multi-user.target`, with no
+ordering between them. LACT reliably lands **~0.4 s after** the tuning script and
+resets any GPU it has no config entry for back to board defaults — power limit to
+stock TGP, clock offsets to 0. The tuner service still exits `0` and logs
+"power 300W", which makes this very easy to misdiagnose. Confirm with:
+
+```bash
+journalctl -b | grep 'initialized nvidia controller'
+```
+
+Do not run both. Put the value in `/etc/lact/config.yaml` and disable the old unit:
+
+```bash
+sudo systemctl disable --now nvidia-tuner-low-power-pro6000.service
+```
+
+**2. LACT config keys are PCI-address-based.** Adding, removing or moving a card
+renumbers the PCI bus, the key stops matching, and your settings silently fall
+back to defaults. Re-check `/etc/lact/config.yaml` after any hardware change.
+
+---
+
+# Superseded below
+
+> Everything from here on is the **pre-LACT** tuning path. It is kept for
+> reference and still functional — the card-specific measurements in particular
+> (memory-offset risk tables, power-limit constants, validated RTX 5090 profiles)
+> are not recorded anywhere else. Prefer LACT for new setups.
+>
+> Do **not** combine the systemd units described below with a running `lactd` —
+> see the gotcha above.
+
+---
+
+## Superseded Quick Start (RTX PRO 6000)
 
 ```bash
 # 1. Install the NVIDIA driver + CUDA toolkit first
@@ -41,16 +196,7 @@ bash nvidia-settings/install.sh
 ./nvidia-settings/oc-memory-pro6000.sh 250    # very conservative start
 ./nvidia-settings/oc-memory-pro6000.sh 500    # moderate — test thoroughly
 
-# ECC is disabled by default on this install — check or toggle it:
-./nvidia-settings/ecc-pro6000.sh status   # no sudo needed
-./nvidia-settings/ecc-pro6000.sh on       # pending — needs a reboot to apply
-./nvidia-settings/ecc-pro6000.sh off      # pending — needs a reboot to apply
-
-# 5. Monitor in real time (watch ECC error counters, not just temps —
-#    only meaningful while ECC is on)
-./monitor.sh
-
-# 6. Revert to stock
+# 5. Revert to stock
 ./nvidia-settings/oc-reset-pro6000.sh
 
 # Wayland-friendly method: nvidia-tuner presets
@@ -60,14 +206,11 @@ nvidia-tuner --core-clock-offset -50 --memory-clock-offset 500 --power-limit 500
 ./nvidia-tuner/apply-default-pro6000.sh        # core 0, mem 0, PL 600W
 
 # Undervolt profile helpers (UNVALIDATED starting points — see caveat below)
-./nvidia-tuner/apply-balanced-pro6000.sh       # core -50, mem +500, PL 500W
-./nvidia-tuner/apply-efficient-pro6000.sh      # core -75, mem +500, PL 450W
+./nvidia-tuner/apply-balanced-pro6000.sh       # core -75, mem +2000, PL 500W
+./nvidia-tuner/apply-efficient-pro6000.sh      # core -75, mem +1000, PL 450W
 ./nvidia-tuner/apply-max-efficiency-pro6000.sh # core -75, mem +1000, PL 400W
-./nvidia-tuner/apply-low-power-pro6000.sh      # core -50, mem +500, PL 300W
+./nvidia-tuner/apply-low-power-pro6000.sh      # core -75, mem +1000, PL 300W
 ```
-
-If Secure Boot is enabled, `install-driver.sh` will prompt for a MOK enrollment password and the key will be enrolled on the next reboot.
-If the driver is already installed and the GPU is working, `install-driver.sh` is optional unless you want the CUDA toolkit or need to refresh the Secure Boot enrollment path.
 
 > **RTX PRO 6000 caveat:** none of the offsets/profiles above have been
 > validated on real hardware yet — they're conservative starting points, not
@@ -89,10 +232,11 @@ If the driver is already installed and the GPU is working, `install-driver.sh` i
 
 ---
 
-## Quick Start (RTX 5090 — previous card, kept for reference)
+## Superseded Quick Start (RTX 5090 — previous card, kept for reference)
 
 Keep this around in case you reinstall a 5090, or as a template for tuning
 another 5090.
+
 
 ```bash
 # 1. Install the NVIDIA driver + CUDA toolkit first
@@ -207,6 +351,10 @@ uptime.
 
 ## Power Limit
 
+> **Superseded.** `lact cli -g <id> power-limit set <W>` does the same thing and
+> persists it to `/etc/lact/config.yaml` across reboots. The board constants below
+> are still accurate and worth reading.
+
 Max is **600 W** on both cards via `nvidia-smi -pl`, but the stock/default
 value and board minimum differ (RTX 5090: 400–600 W; RTX PRO 6000: 150–600 W,
 confirmed live on the installed card):
@@ -266,6 +414,10 @@ rather not keep the small VRAM/bandwidth overhead ECC carries day to day.
 ---
 
 ## Making the Overclock Persistent on Boot
+
+> **Superseded.** LACT applies its own config at boot with no extra unit needed,
+> and unlike this approach it also re-applies after resume from sleep. The service
+> below will fight `lactd` if both are active.
 
 Create a systemd service that re-applies the offset after each login. Point
 `ExecStart` at the script suffix matching your card.
@@ -327,10 +479,14 @@ nvidia-tuner --help
 
 ### Make preset persistent after reboot (systemd)
 
+> **Conflicts with LACT.** If `lactd` is running, it will overwrite whatever this
+> unit applies roughly 0.4 s later, while the unit still reports success. Use one
+> or the other, never both — see [Two gotchas worth knowing](#two-gotchas-worth-knowing).
+
 **Currently provided: RTX PRO 6000 low-power profile, enabled at boot.**
 [`systemd/nvidia-tuner-low-power-pro6000.service`](systemd/nvidia-tuner-low-power-pro6000.service)
-in this repo runs `nvidia-tuner/apply-low-power-pro6000.sh` (core `-50`,
-memory `+500`, power `300 W`) as a `oneshot` service on every boot, targeting
+in this repo runs `nvidia-tuner/apply-low-power-pro6000.sh` (core `-75`,
+memory `+1000`, power `300 W`) as a `oneshot` service on every boot, targeting
 `multi-user.target` so it doesn't wait on a display session. Install it with:
 
 ```bash
@@ -407,16 +563,21 @@ stability on your own hardware before relying on them:
 ./nvidia-tuner/apply-max-efficiency-5090.sh
 ```
 
-**RTX PRO 6000** — **unvalidated starting points**, deliberately more
-conservative than the 5090 profiles (no headroom data yet, ECC memory raises
-the cost of guessing wrong):
+**RTX PRO 6000** — **unvalidated starting points** (no headroom data yet, and
+ECC memory raises the cost of guessing wrong):
+
+> The memory offsets here have been raised over time and `balanced` now sits at
+> `+2000`, well past the `+1500` safety cap that `nvidia-settings/oc-memory-pro6000.sh`
+> enforces on the other code path. Nothing validates these numbers — treat them as
+> someone's working guesses, not tested values, and re-read the ECC warning above
+> before trusting compute output produced under them.
 
 | Profile        | Core offset | Memory offset | Power limit |
 | -------------- | ----------- | ------------- | ----------- |
-| Balanced       | `-50`       | `+500`        | `500 W`     |
-| Efficient      | `-75`       | `+500`        | `450 W`     |
+| Balanced       | `-75`       | `+2000`       | `500 W`     |
+| Efficient      | `-75`       | `+1000`       | `450 W`     |
 | Max efficiency | `-75`       | `+1000`       | `400 W`     |
-| Low power      | `-50`       | `+500`        | `300 W`     |
+| Low power      | `-75`       | `+1000`       | `300 W`     |
 
 ```bash
 ./nvidia-tuner/apply-balanced-pro6000.sh
@@ -432,36 +593,36 @@ and re-test.
 
 ## Files
 
+Legend: **[active]** = still the recommended tool · **[superseded]** = works, but LACT does it better
+
 ```
 nvidia-tuning-toolkit/
-├── install-driver.sh                    # Driver + CUDA bootstrap (NVIDIA open driver + Secure Boot) — either card
-├── monitor.sh                           # Live GPU stats (1s refresh) — either card, name detected automatically
+├── install-driver.sh                    # [active]     Driver + CUDA bootstrap (NVIDIA open driver + Secure Boot) — either card
+├── monitor.sh                           # [active]     Live GPU stats + ECC error counters (1s refresh) — LACT has no ECC counters
 ├── nvidia-settings/
-│   ├── install.sh                       # One-shot setup (Coolbits + permissions) — either card
+│   ├── ecc-pro6000.sh                   # [active]     RTX PRO 6000: check/toggle ECC mode (pending until GPU reset) — LACT has no ECC support
+│   ├── install.sh                        # [superseded] One-shot setup (Coolbits + permissions) — LACT uses NVML, needs no Coolbits
 │   ├── config/
-│   │   └── 10-coolbits.conf             # xorg.conf.d snippet — unlock OC controls (shared, generic)
-│   ├── power-limit-5090.sh              # RTX 5090: set GPU power limit (400–600 W)
-│   ├── power-limit-pro6000.sh           # RTX PRO 6000: set GPU power limit (150–600 W)
-│   ├── oc-memory-5090.sh                # RTX 5090: apply memory transfer-rate offset
-│   ├── oc-memory-pro6000.sh             # RTX PRO 6000: apply memory transfer-rate offset (conservative cap)
-│   ├── oc-reset-5090.sh                 # RTX 5090: reset offset to stock (0)
-│   ├── oc-reset-pro6000.sh              # RTX PRO 6000: reset offset to stock (0)
-│   └── ecc-pro6000.sh                   # RTX PRO 6000: check/toggle ECC mode (pending until GPU reset)
-├── nvidia-tuner/
+│   │   └── 10-coolbits.conf             # [superseded] xorg.conf.d snippet — unlock OC controls (Xorg only)
+│   ├── power-limit-5090.sh              # [superseded] RTX 5090: set GPU power limit (400–600 W) — use `lact cli power-limit set`
+│   ├── power-limit-pro6000.sh           # [superseded] RTX PRO 6000: set GPU power limit (150–600 W) — use `lact cli power-limit set`
+│   ├── oc-memory-5090.sh                # [superseded] RTX 5090: apply memory transfer-rate offset — use LACT GUI
+│   ├── oc-memory-pro6000.sh             # [superseded] RTX PRO 6000: apply memory transfer-rate offset (conservative cap)
+│   ├── oc-reset-5090.sh                 # [superseded] RTX 5090: reset offset to stock (0)
+│   └── oc-reset-pro6000.sh              # [superseded] RTX PRO 6000: reset offset to stock (0)
+├── nvidia-tuner/                        # [superseded] all presets below — use LACT profiles instead
 │   ├── apply-default-5090.sh            # RTX 5090: stock clocks, max power (0 core, 0 mem, 600 W)
 │   ├── apply-default-pro6000.sh         # RTX PRO 6000: stock clocks, max power (0 core, 0 mem, 600 W)
 │   ├── apply-balanced-5090.sh           # RTX 5090: -75 core, +2500 mem, 500 W (validated)
-│   ├── apply-balanced-pro6000.sh        # RTX PRO 6000: -50 core, +500 mem, 500 W (unvalidated)
+│   ├── apply-balanced-pro6000.sh        # RTX PRO 6000: -75 core, +2000 mem, 500 W (unvalidated)
 │   ├── apply-efficient-5090.sh          # RTX 5090: -125 core, +2500 mem, 450 W (validated)
-│   ├── apply-efficient-pro6000.sh       # RTX PRO 6000: -75 core, +500 mem, 450 W (unvalidated)
+│   ├── apply-efficient-pro6000.sh       # RTX PRO 6000: -75 core, +1000 mem, 450 W (unvalidated)
 │   ├── apply-max-efficiency-5090.sh     # RTX 5090: -125 core, +3000 mem, 400 W (validated)
 │   ├── apply-max-efficiency-pro6000.sh  # RTX PRO 6000: -75 core, +1000 mem, 400 W (unvalidated)
-│   └── apply-low-power-pro6000.sh       # RTX PRO 6000: -50 core, +500 mem, 300 W (unvalidated clock offsets; wattage confirmed in-range)
+│   └── apply-low-power-pro6000.sh       # RTX PRO 6000: -75 core, +1000 mem, 300 W (unvalidated clock offsets; wattage confirmed in-range)
 └── systemd/
-    └── nvidia-tuner-low-power-pro6000.service  # Boot unit: runs apply-low-power-pro6000.sh at startup (see "Make preset persistent")
+    └── nvidia-tuner-low-power-pro6000.service  # [superseded] Boot unit — CONFLICTS with lactd, see "Two gotchas worth knowing"
 ```
-
----
 
 ## Troubleshooting
 
@@ -474,3 +635,27 @@ nvidia-tuning-toolkit/
 | Coolbits installed but OC controls still missing                            | Wrong `BusID` in `10-coolbits.conf`                                                            | Run `lspci \| grep -i nvidia`, convert the address to `PCI:bus:device:function`, and update the `BusID` line (or omit it on single-GPU systems) |
 | Ran the wrong `-5090` / `-pro6000` script for your card                     | Script targets a different GPU's tuned defaults                                                | Check `nvidia-smi --query-gpu=name --format=csv,noheader` and use the matching suffix; power-limit/OC values are model-specific                 |
 | RTX PRO 6000: `power-limit-pro6000.sh` rejects a value you expected to work | Constants assume Workstation Edition (600 W); you may have Max-Q (300 W) or Server (450–600 W) | Run `power-limit-pro6000.sh status` and edit `LIMIT_DEFAULT`/`LIMIT_MAX`/`LIMIT_MIN` in the script to match your edition                        |
+| Tuning silently reverts to stock a moment after boot                        | `lactd` is running and resets any GPU it has no config entry for                                | Don't run both. Put the values in `/etc/lact/config.yaml`, then `sudo systemctl disable --now nvidia-tuner-*.service`. Verify with `journalctl -b \| grep 'initialized nvidia controller'` |
+| LACT settings lost after adding/moving a GPU                                | LACT config keys are PCI-address-based; the bus got renumbered                                  | Re-apply the setting in LACT; the new key is written to `/etc/lact/config.yaml` automatically                                                    |
+| `lact cli` has no command for clock offsets                                 | Not a bug — the CLI only exposes `list`/`info`/`stats`/`snapshot`/`power-limit`/`profile`       | Set offsets in `lact gui`, save them as a profile, then switch non-interactively with `lact cli profile set <name>`                              |
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Daimonion
+
+**Read this before running anything here.** These scripts change GPU power
+limits and apply core/memory clock offsets. That can destabilise hardware, and
+with ECC disabled — the current state of this install — an unstable memory
+offset can silently corrupt compute results without ever crashing or producing
+a visible artifact. The RTX PRO 6000 profiles in particular are **unvalidated
+guesses, not tested values**. The MIT licence says this in legal terms: the
+software is provided *"as is", without warranty of any kind*, and the authors
+are not liable for any damages arising from its use. Validate any profile
+against known-good workload output before trusting it.
+
+Only the code in this repository is covered. [LACT](https://github.com/ilya-zlobintsev/LACT)
+and [`nvidia-tuner`](https://github.com/WickedLukas/nvidia-tuner) are separate
+upstream projects under their own licences — neither is vendored here, both are
+installed from their own releases.
